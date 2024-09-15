@@ -1,6 +1,10 @@
+import gleam/bool
+import gleam/dict
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/order
+import gleam/otp/task
 import gleam/result
 import gleam/string
 
@@ -38,7 +42,7 @@ pub type Move {
 }
 
 type Board =
-  List(Tile)
+  dict.Dict(Coordinate, Tile)
 
 pub type Error {
   OutofBoundsError(c: Coordinate)
@@ -46,6 +50,11 @@ pub type Error {
   IllegalMoveError(m: Move)
   OccupiedTileError(c: Coordinate)
   OccupiedVectorPathError(v: Vector)
+  NoAvailableMoves
+}
+
+pub fn other_color(c: Color) -> Color {
+  1 - c
 }
 
 pub fn coord_to_int(c: Coordinate) -> Int {
@@ -54,6 +63,22 @@ pub fn coord_to_int(c: Coordinate) -> Int {
 
 pub fn int_to_coord(i: Int) -> Coordinate {
   C(i % 10, i / 10)
+}
+
+pub fn coord_to_string(c: Coordinate) -> String {
+  "C(" <> int.to_string(c.x) <> ", " <> int.to_string(c.y) <> ")"
+}
+
+pub fn vector_to_string(v: Vector) -> String {
+  coord_to_string(v.start) <> " -> " <> coord_to_string(v.end)
+}
+
+pub fn move_to_string(m: Move) -> String {
+  coord_to_string(m.start)
+  <> " -> "
+  <> coord_to_string(m.end)
+  <> " --> "
+  <> coord_to_string(m.shoot)
 }
 
 pub fn initial_board() -> Board {
@@ -76,12 +101,14 @@ pub fn initial_board() -> Board {
         _ -> False
       }
     }
-    case list.filter(pieces, filter_fun) {
+    let tile = case list.filter(pieces, filter_fun) {
       [] -> Free
       [PP(_, color)] -> Piece(color)
       _ -> Free
     }
+    #(initial_coord, tile)
   })
+  |> dict.from_list
 }
 
 pub fn tile_to_string(t: Tile) -> String {
@@ -94,39 +121,43 @@ pub fn tile_to_string(t: Tile) -> String {
   }
 }
 
+pub fn coordinate_compare(coord1: Coordinate, coord2: Coordinate) -> order.Order {
+  let comp =
+    bool.or(coord1.y < coord2.y, coord1.y == coord2.y && coord1.x < coord2.x)
+
+  case coord1, coord2 {
+    coord1, coord2 if coord1.y == coord2.y && coord1.x == coord2.x -> order.Eq
+    _, _ if comp -> order.Lt
+    _, _ -> order.Gt
+  }
+}
+
 pub fn board_to_string(b: Board) -> String {
-  list.index_map(b, fn(t: Tile, i: Int) {
-    let coord = int_to_coord(i)
-    case coord.x {
-      9 -> string.concat([tile_to_string(t), "\n"])
-      _ -> tile_to_string(t)
+  dict.to_list(b)
+  |> list.sort(fn(v1: #(Coordinate, Tile), v2: #(Coordinate, Tile)) {
+    case v1, v2 {
+      #(coord1, _), #(coord2, _) -> coordinate_compare(coord1, coord2)
+    }
+  })
+  |> list.map(fn(v: #(Coordinate, Tile)) {
+    case v {
+      #(coord, tile) -> {
+        case coord.x {
+          9 -> string.concat([tile_to_string(tile), "\n"])
+          _ -> tile_to_string(tile)
+        }
+      }
     }
   })
   |> string.concat
 }
 
 pub fn set_tile(b: Board, tp: TilePosition) -> Board {
-  list.index_map(b, fn(t: Tile, i: Int) {
-    let initial_coord = int_to_coord(i)
-    case tp {
-      TP(coord, tile) if coord == initial_coord -> tile
-      _ -> t
-    }
-  })
+  dict.insert(b, tp.coord, tp.t)
 }
 
 pub fn get_tile(b: Board, searched_coordinate: Coordinate) -> Result(Tile, Nil) {
-  list.index_map(b, fn(t: Tile, i: Int) {
-    let initial_coord = int_to_coord(i)
-    TP(initial_coord, t)
-  })
-  |> list.find(fn(tp: TilePosition) {
-    case tp.coord {
-      c if c == searched_coordinate -> True
-      _ -> False
-    }
-  })
-  |> result.then(fn(tp: TilePosition) { Ok(tp.t) })
+  dict.get(b, searched_coordinate)
 }
 
 pub fn validate_coordinate(c: Coordinate) -> Result(Coordinate, Error) {
@@ -188,7 +219,7 @@ pub fn vector_path(b: Board, v: Vector) -> Result(List(TilePosition), Error) {
     })
     |> list.try_fold([], fn(acc, el) {
       case el {
-        Ok(tp) -> Ok(list.append([tp], acc))
+        Ok(tp) -> Ok([tp, ..acc])
         Error(e) -> Error(e)
       }
     })
@@ -244,6 +275,7 @@ pub fn validate_move(
   |> result.then(fn(m: Move) {
     case get_tile(b, m.shoot) {
       Ok(Free) -> Ok(m)
+      Ok(_) if m.shoot == m.start -> Ok(m)
       Ok(_) -> Error(OccupiedTileError(m.end))
       Error(Nil) -> Error(OutofBoundsError(m.end))
     }
@@ -282,20 +314,183 @@ pub fn play_move(board: Board, move: Move, color: Color) -> Result(Board, Error)
   }
 }
 
-pub fn main() {
-  io.println(board_to_string(initial_board()))
-
-  io.println(case
-    play_move(initial_board(), M(C(3, 0), C(4, 1), C(5, 2)), black)
-  {
-    Ok(b) -> board_to_string(b)
-    Error(e) ->
-      case e {
-        OutofBoundsError(_) -> "Out of Bounds"
-        IllegalVectorError(_) -> "Illegal Vector Error"
-        IllegalMoveError(_) -> "Illegal Move Error"
-        OccupiedTileError(_) -> "Occupied Tile Error"
-        OccupiedVectorPathError(_) -> "Occupied Vector Path Error"
-      }
+pub fn possible_vectors_from(board: Board, c: Coordinate) -> List(Vector) {
+  let directions = [
+    C(1, 0),
+    C(1, 1),
+    C(0, 1),
+    C(-1, 1),
+    C(-1, 0),
+    C(-1, -1),
+    C(0, -1),
+    C(1, -1),
+  ]
+  list.range(1, 10)
+  |> list.flat_map(fn(x: Int) {
+    list.map(directions, fn(y: Coordinate) { #(x, y) })
   })
+  |> list.map(fn(v: #(Int, Coordinate)) {
+    case v {
+      #(i, dir) -> {
+        let vector = V(c, C(c.x + i * dir.x, c.y + i * dir.y))
+        #(vector, vector_path_check_free(board, vector))
+      }
+    }
+  })
+  |> list.filter_map(fn(v: #(Vector, Result(Nil, Error))) {
+    case v {
+      #(vector, Ok(Nil)) -> Ok(vector)
+      #(_, Error(e)) -> Error(e)
+    }
+  })
+}
+
+pub fn possible_moves_from(board: Board, c: Coordinate) -> List(Move) {
+  let initial_tile = get_tile(board, c)
+
+  case initial_tile {
+    Ok(initial_tile) -> {
+      possible_vectors_from(board, c)
+      |> list.flat_map(fn(v: Vector) {
+        let new_board =
+          board
+          |> set_tile(TP(v.end, initial_tile))
+          |> set_tile(TP(c, Free))
+        list.map(possible_vectors_from(new_board, v.end), fn(v2: Vector) {
+          M(v.start, v.end, v2.end)
+        })
+      })
+    }
+    Error(Nil) -> []
+  }
+}
+
+pub fn possible_moves(board: Board, color: Color) -> List(Move) {
+  dict.filter(board, fn(_: Coordinate, t: Tile) {
+    case t {
+      Piece(c) if c == color -> True
+      _ -> False
+    }
+  })
+  |> dict.to_list()
+  |> list.flat_map(fn(v: #(Coordinate, Tile)) {
+    case v {
+      #(c, _) -> possible_moves_from(board, c)
+    }
+  })
+  |> list.filter(fn(m: Move) {
+    case validate_move(board, m, color) {
+      Ok(_) -> True
+      Error(_) -> False
+    }
+  })
+}
+
+pub fn play_random_move(board: Board, color: Color) -> Result(Board, Error) {
+  let random_move =
+    possible_moves(board, color)
+    |> list.shuffle()
+    |> list.first()
+
+  case random_move {
+    Ok(random_move) -> play_move(board, random_move, color)
+    Error(Nil) -> Error(NoAvailableMoves)
+  }
+}
+
+pub fn play_random_game(board: Board, color: Color) -> Board {
+  case possible_moves(board, color) {
+    [] -> board
+    _ ->
+      case play_random_move(board, color) {
+        Ok(board) -> play_random_game(board, other_color(color))
+        Error(_) -> board
+      }
+  }
+}
+
+pub fn evaluate_board(board: Board, color: Color) -> Int {
+  list.length(possible_moves(board, color))
+  - list.length(possible_moves(board, other_color(color)))
+}
+
+pub fn pick_best_move(
+  board: Board,
+  color: Color,
+  eval: fn(Board, Color) -> Int,
+) -> Result(#(Move, Int), Nil) {
+  possible_moves(board, color)
+  |> list.filter_map(fn(m: Move) {
+    case play_move(board, m, color) {
+      Ok(b) -> Ok(#(m, eval(b, color)))
+      Error(_) -> Error(Nil)
+    }
+  })
+  |> list.sort(fn(x1: #(Move, Int), x2: #(Move, Int)) {
+    case x1, x2 {
+      #(_, i1), #(_, i2) -> int.compare(i2, i1)
+      // reverse to get best
+    }
+  })
+  |> list.first()
+}
+
+pub fn pick_best_move_parallel(
+  board: Board,
+  color: Color,
+  eval: fn(Board, Color) -> Int,
+) -> Result(#(Move, Int), Nil) {
+  possible_moves(board, color)
+  |> list.map(fn(m: Move) {
+    task.async(fn() {
+      case play_move(board, m, color) {
+        Ok(b) -> Ok(#(m, eval(b, color)))
+        Error(_) -> Error(Nil)
+      }
+    })
+  })
+  |> list.map(task.await_forever)
+  |> list.filter_map(fn(x) { x })
+  |> list.sort(fn(x1: #(Move, Int), x2: #(Move, Int)) {
+    case x1, x2 {
+      #(_, i1), #(_, i2) -> int.compare(i2, i1)
+      // reverse to get best
+    }
+  })
+  |> list.first()
+}
+
+pub fn play_eval_game(
+  board: Board,
+  color: Color,
+  eval: fn(Board, Color) -> Int,
+) -> Board {
+  io.println(board_to_string(board))
+  case possible_moves(board, color) {
+    [] -> board
+    _ -> {
+      case pick_best_move_parallel(board, color, eval) {
+        Ok(#(move, i)) -> {
+          io.println(
+            "Eval for color "
+            <> int.to_string(color)
+            <> ": "
+            <> int.to_string(i),
+          )
+          case play_move(board, move, color) {
+            Ok(board) -> play_eval_game(board, other_color(color), eval)
+            Error(_) -> board
+          }
+        }
+        Error(_) -> board
+      }
+    }
+  }
+}
+
+pub fn main() {
+  let board = initial_board()
+  io.println(board_to_string(board))
+  io.println(int.to_string(evaluate_board(board, black)))
+  io.println(board_to_string(play_eval_game(board, black, evaluate_board)))
 }
