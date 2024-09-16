@@ -314,51 +314,39 @@ pub fn play_move(board: Board, move: Move, color: Color) -> Result(Board, Error)
   }
 }
 
+pub fn empty_path(
+  board: Board,
+  c: Coordinate,
+  dir: Coordinate,
+  current: List(Coordinate),
+) -> List(Coordinate) {
+  let new_c = C(c.x + dir.x, c.y + dir.y)
+  case get_tile(board, new_c) {
+    Ok(Free) -> empty_path(board, new_c, dir, [new_c, ..current])
+    Ok(_) -> current
+    Error(_) -> current
+  }
+}
+
 pub fn possible_vectors_from(board: Board, c: Coordinate) -> List(Vector) {
-  let directions = [
-    C(1, 0),
-    C(1, 1),
-    C(0, 1),
-    C(-1, 1),
-    C(-1, 0),
-    C(-1, -1),
-    C(0, -1),
-    C(1, -1),
-  ]
-  list.range(1, 10)
-  |> list.flat_map(fn(x: Int) {
-    list.map(directions, fn(y: Coordinate) { #(x, y) })
-  })
-  |> list.map(fn(v: #(Int, Coordinate)) {
-    case v {
-      #(i, dir) -> {
-        let vector = V(c, C(c.x + i * dir.x, c.y + i * dir.y))
-        #(vector, vector_path_check_free(board, vector))
-      }
-    }
-  })
-  |> list.filter_map(fn(v: #(Vector, Result(Nil, Error))) {
-    case v {
-      #(vector, Ok(Nil)) -> Ok(vector)
-      #(_, Error(e)) -> Error(e)
-    }
-  })
+  [C(1, 0), C(1, 1), C(0, 1), C(-1, 1), C(-1, 0), C(-1, -1), C(0, -1), C(1, -1)]
+  |> list.flat_map(fn(dir: Coordinate) { empty_path(board, c, dir, []) })
+  |> list.map(fn(end_c: Coordinate) { V(c, end_c) })
 }
 
 pub fn possible_moves_from(board: Board, c: Coordinate) -> List(Move) {
   let initial_tile = get_tile(board, c)
 
   case initial_tile {
-    Ok(initial_tile) -> {
+    Ok(_) -> {
       possible_vectors_from(board, c)
       |> list.flat_map(fn(v: Vector) {
-        let new_board =
-          board
-          |> set_tile(TP(v.end, initial_tile))
-          |> set_tile(TP(c, Free))
-        list.map(possible_vectors_from(new_board, v.end), fn(v2: Vector) {
-          M(v.start, v.end, v2.end)
-        })
+        [
+          M(v.start, v.end, v.start),
+          ..list.map(possible_vectors_from(board, v.end), fn(v2: Vector) {
+            M(v.start, v.end, v2.end)
+          })
+        ]
       })
     }
     Error(Nil) -> []
@@ -376,12 +364,6 @@ pub fn possible_moves(board: Board, color: Color) -> List(Move) {
   |> list.flat_map(fn(v: #(Coordinate, Tile)) {
     case v {
       #(c, _) -> possible_moves_from(board, c)
-    }
-  })
-  |> list.filter(fn(m: Move) {
-    case validate_move(board, m, color) {
-      Ok(_) -> True
-      Error(_) -> False
     }
   })
 }
