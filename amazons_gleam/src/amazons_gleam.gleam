@@ -1,5 +1,6 @@
 import gleam/bool
 import gleam/dict
+import gleam/float
 import gleam/int
 import gleam/io
 import gleam/list
@@ -53,6 +54,18 @@ pub type Error {
   NoAvailableMoves
 }
 
+pub fn error_to_string(e: Error) -> String {
+  case e {
+    OutofBoundsError(c) -> "Out of Bounds " <> coord_to_string(c)
+    IllegalVectorError(v) -> "Illegal Vector Error " <> vector_to_string(v)
+    IllegalMoveError(m) -> "Illegal Move Error " <> move_to_string(m)
+    OccupiedTileError(c) -> "Occupied Tile Error " <> coord_to_string(c)
+    OccupiedVectorPathError(v) ->
+      "Occupied Vector Path Error " <> vector_to_string(v)
+    NoAvailableMoves -> "No Available Moves"
+  }
+}
+
 pub fn other_color(c: Color) -> Color {
   1 - c
 }
@@ -63,6 +76,10 @@ pub fn coord_to_int(c: Coordinate) -> Int {
 
 pub fn int_to_coord(i: Int) -> Coordinate {
   C(i % 10, i / 10)
+}
+
+pub fn int_to_coord_mod(i: Int, m: Int) -> Coordinate {
+  C(i % m, i / m)
 }
 
 pub fn coord_to_string(c: Coordinate) -> String {
@@ -111,6 +128,28 @@ pub fn initial_board() -> Board {
   |> dict.from_list
 }
 
+pub fn test_board() -> Board {
+  let pieces: List(PiecePosition) = [PP(C(0, 0), black), PP(C(2, 2), white)]
+  list.repeat(Free, 9)
+  |> list.index_map(fn(_: Tile, i: Int) {
+    let initial_coord = int_to_coord_mod(i, 3)
+
+    let filter_fun = fn(pp: PiecePosition) {
+      case pp {
+        PP(coord, _) if coord == initial_coord -> True
+        _ -> False
+      }
+    }
+    let tile = case list.filter(pieces, filter_fun) {
+      [] -> Free
+      [PP(_, color)] -> Piece(color)
+      _ -> Free
+    }
+    #(initial_coord, tile)
+  })
+  |> dict.from_list
+}
+
 pub fn tile_to_string(t: Tile) -> String {
   case t {
     Free -> "🟥"
@@ -132,7 +171,7 @@ pub fn coordinate_compare(coord1: Coordinate, coord2: Coordinate) -> order.Order
   }
 }
 
-pub fn board_to_string(b: Board) -> String {
+pub fn board_to_string(b: Board, width: Int) -> String {
   dict.to_list(b)
   |> list.sort(fn(v1: #(Coordinate, Tile), v2: #(Coordinate, Tile)) {
     case v1, v2 {
@@ -140,11 +179,44 @@ pub fn board_to_string(b: Board) -> String {
     }
   })
   |> list.map(fn(v: #(Coordinate, Tile)) {
+    let end = width - 1
     case v {
       #(coord, tile) -> {
         case coord.x {
-          9 -> string.concat([tile_to_string(tile), "\n"])
+          x if x == end -> string.concat([tile_to_string(tile), "\n"])
           _ -> tile_to_string(tile)
+        }
+      }
+    }
+  })
+  |> string.concat
+}
+
+pub fn board_to_string_last_move(b: Board, width: Int, move: Move) -> String {
+  dict.to_list(b)
+  |> list.sort(fn(v1: #(Coordinate, Tile), v2: #(Coordinate, Tile)) {
+    case v1, v2 {
+      #(coord1, _), #(coord2, _) -> coordinate_compare(coord1, coord2)
+    }
+  })
+  |> list.map(fn(v: #(Coordinate, Tile)) {
+    let end = width - 1
+    case v {
+      #(coord, tile) -> {
+        let tile_in_string = case coord {
+          c if c == move.end ->
+            case tile {
+              Piece(c) if c == black -> "🖤"
+              Piece(c) if c == white -> "🤍"
+              _ -> tile_to_string(tile)
+            }
+          c if c == move.shoot -> "💥"
+          c if c == move.start -> "🔴"
+          _ -> tile_to_string(tile)
+        }
+        case coord.x {
+          x if x == end -> string.concat([tile_in_string, "\n"])
+          _ -> tile_in_string
         }
       }
     }
@@ -268,7 +340,9 @@ pub fn validate_move(
   |> result.then(fn(m: Move) {
     case get_tile(b, m.end) {
       Ok(Free) -> Ok(m)
-      Ok(_) -> Error(OccupiedTileError(m.end))
+      Ok(_) -> {
+        Error(OccupiedTileError(m.end))
+      }
       Error(Nil) -> Error(OutofBoundsError(m.end))
     }
   })
@@ -276,7 +350,9 @@ pub fn validate_move(
     case get_tile(b, m.shoot) {
       Ok(Free) -> Ok(m)
       Ok(_) if m.shoot == m.start -> Ok(m)
-      Ok(_) -> Error(OccupiedTileError(m.end))
+      Ok(_) -> {
+        Error(OccupiedTileError(m.end))
+      }
       Error(Nil) -> Error(OutofBoundsError(m.end))
     }
   })
@@ -310,7 +386,9 @@ pub fn play_move(board: Board, move: Move, color: Color) -> Result(Board, Error)
       |> set_tile(TP(move.end, Piece(color)))
       |> set_tile(TP(move.shoot, Arrow))
       |> fn(b: Board) { Ok(b) }
-    Error(e) -> Error(e)
+    Error(e) -> {
+      Error(e)
+    }
   }
 }
 
@@ -391,9 +469,343 @@ pub fn play_random_game(board: Board, color: Color) -> Board {
   }
 }
 
-pub fn evaluate_board(board: Board, color: Color) -> Int {
-  list.length(possible_moves(board, color))
-  - list.length(possible_moves(board, other_color(color)))
+pub fn length_empty_path(
+  board: Board,
+  c: Coordinate,
+  dir: Coordinate,
+  current: Int,
+) -> Int {
+  let new_c = C(c.x + dir.x, c.y + dir.y)
+  case get_tile(board, new_c) {
+    Ok(Free) -> length_empty_path(board, new_c, dir, current + 1)
+    Ok(_) -> current
+    Error(_) -> current
+  }
+}
+
+pub fn num_possible_vectors_from(board: Board, c: Coordinate) -> Int {
+  [C(1, 0), C(1, 1), C(0, 1), C(-1, 1), C(-1, 0), C(-1, -1), C(0, -1), C(1, -1)]
+  |> list.map(fn(dir: Coordinate) { length_empty_path(board, c, dir, 0) })
+  |> int.sum
+}
+
+pub fn num_possible_moves_from(board: Board, c: Coordinate) -> Int {
+  let initial_tile = get_tile(board, c)
+
+  case initial_tile {
+    Ok(_) -> {
+      possible_vectors_from(board, c)
+      |> list.map(fn(v: Vector) { 1 + num_possible_vectors_from(board, v.end) })
+      |> int.sum
+    }
+    Error(Nil) -> 0
+  }
+}
+
+pub fn num_possible_moves(board: Board, color: Color) -> Int {
+  dict.filter(board, fn(_: Coordinate, t: Tile) {
+    case t {
+      Piece(c) if c == color -> True
+      _ -> False
+    }
+  })
+  |> dict.to_list()
+  |> list.map(fn(v: #(Coordinate, Tile)) {
+    case v {
+      #(c, _) -> num_possible_moves_from(board, c)
+    }
+  })
+  |> int.sum
+}
+
+pub const max = 100_000
+
+pub const min = -100_000
+
+const win = 2000
+
+const loss = -1000
+
+pub fn evaluate_board_simple(board: Board, color: Color) -> Int {
+  case num_possible_moves(board, color) {
+    v if v == 0 -> loss
+    v -> v - num_possible_moves(board, other_color(color))
+  }
+}
+
+pub type MCNode {
+  N(
+    board: Board,
+    move: Move,
+    value: Int,
+    self_value: Int,
+    n: Int,
+    children: dict.Dict(Int, MCNode),
+  )
+}
+
+pub fn tree_to_string(depth: Int, node: MCNode) -> String {
+  "- "
+  <> list.repeat("\t", depth)
+  |> string.concat()
+  <> "Node("
+  <> move_to_string(node.move)
+  <> ", value: "
+  <> float.to_string(final_eval_node(node))
+  <> " ("
+  <> int.to_string(node.self_value)
+  <> ") "
+  <> " with n: "
+  <> int.to_string(node.n)
+  <> case dict.is_empty(node.children) {
+    True -> ""
+    False -> "\n"
+  }
+  <> dict.to_list(node.children)
+  |> list.map(fn(v: #(Int, MCNode)) {
+    case v {
+      #(_, node) -> tree_to_string(depth + 1, node) <> "\n"
+    }
+  })
+  |> string.concat()
+}
+
+pub fn eval_node(node: MCNode, parent: MCNode) -> Float {
+  int.to_float(node.value)
+  /. int.to_float(node.n)
+  +. case
+    float.square_root(
+      case float.square_root(int.to_float(parent.n)) {
+        Ok(v) -> v
+        Error(Nil) -> 0.0
+      }
+      /. int.to_float(node.n),
+    )
+  {
+    Ok(v) -> v
+    Error(Nil) -> 0.0
+  }
+}
+
+pub fn final_eval_node(node: MCNode) -> Float {
+  int.to_float(node.value) /. int.to_float(node.n)
+}
+
+pub fn color_from_depth(depth: Int, initial_color: Color) {
+  case int.modulo(depth, 2) {
+    Ok(0) -> initial_color
+    Ok(_) -> other_color(initial_color)
+    Error(_) -> initial_color
+  }
+}
+
+pub fn multiplier_from_depth(depth: Int) {
+  case int.modulo(depth, 2) {
+    Ok(0) -> 1
+    Ok(_) -> -1
+    Error(_) -> 1
+  }
+}
+
+pub fn explore_tree(
+  initial_color: Color,
+  depth: Int,
+  max_depth: Int,
+  current_tree: MCNode,
+) -> MCNode {
+  let color = color_from_depth(depth, initial_color)
+
+  case dict.is_empty(current_tree.children) {
+    True -> {
+      case num_possible_moves(current_tree.board, color) {
+        v if v == 0 ->
+          N(
+            current_tree.board,
+            current_tree.move,
+            multiplier_from_depth(depth) * loss,
+            multiplier_from_depth(depth) * loss,
+            1,
+            dict.new(),
+          )
+        v -> {
+          possible_moves(current_tree.board, color)
+          |> list.map(fn(m: Move) {
+            task.async(fn() {
+              case play_move(current_tree.board, m, color) {
+                Ok(new_board) -> {
+                  let board_eval =
+                    evaluate_board_simple(
+                      new_board,
+                      color_from_depth(depth, initial_color),
+                    )
+                    * multiplier_from_depth(depth)
+                  Ok(N(new_board, m, board_eval, board_eval, 1, dict.new()))
+                }
+                Error(_) -> Error(Nil)
+              }
+            })
+          })
+          |> list.filter_map(task.await_forever)
+          |> fn(children: List(MCNode)) {
+            let children_sum: Int =
+              children
+              |> list.map(fn(n: MCNode) { n.value })
+              |> int.sum()
+
+            let children_dict: dict.Dict(Int, MCNode) =
+              children
+              |> list.index_map(fn(n: MCNode, i: Int) { #(i, n) })
+              |> dict.from_list()
+
+            explore_tree(
+              initial_color,
+              depth,
+              max_depth,
+              N(
+                current_tree.board,
+                current_tree.move,
+                children_sum + current_tree.value,
+                current_tree.self_value,
+                list.length(children) + 1,
+                children_dict,
+              ),
+            )
+          }
+        }
+      }
+    }
+    False -> {
+      case depth {
+        depth if depth == max_depth -> {
+          current_tree
+        }
+        _ -> {
+          let child =
+            current_tree.children
+            |> dict.to_list
+            |> list.map(fn(c: #(Int, MCNode)) {
+              case c {
+                #(i, c) -> #(i, eval_node(c, current_tree), c)
+              }
+            })
+            |> list.sort(fn(a: #(Int, Float, MCNode), b: #(Int, Float, MCNode)) {
+              case a, b {
+                #(_, v_a, _), #(_, v_b, _) -> float.compare(v_b, v_a)
+                // reverse to get max
+              }
+            })
+            |> list.first()
+
+          case child {
+            Ok(#(index, _, child)) -> {
+              let new_child =
+                explore_tree(initial_color, depth + 1, max_depth, child)
+
+              let new_children =
+                dict.insert(current_tree.children, index, new_child)
+
+              let new_children_sum: Int =
+                new_children
+                |> dict.to_list()
+                |> list.map(fn(v: #(Int, MCNode)) {
+                  case v {
+                    #(_, node) -> node.value
+                  }
+                })
+                |> int.sum()
+
+              let new_children_n: Int =
+                new_children
+                |> dict.to_list()
+                |> list.map(fn(v: #(Int, MCNode)) {
+                  case v {
+                    #(_, node) -> node.n
+                  }
+                })
+                |> int.sum()
+
+              N(
+                current_tree.board,
+                current_tree.move,
+                new_children_sum + current_tree.self_value,
+                current_tree.self_value,
+                new_children_n + 1,
+                new_children,
+              )
+            }
+            Error(Nil) -> current_tree
+          }
+        }
+      }
+    }
+  }
+}
+
+pub fn mc_eval_(
+  color: Color,
+  budget: Int,
+  max_depth: Int,
+  current_tree: MCNode,
+) -> MCNode {
+  case budget {
+    0 -> current_tree
+    _ ->
+      mc_eval_(
+        color,
+        budget - 1,
+        max_depth,
+        explore_tree(color, 0, max_depth, current_tree),
+      )
+  }
+}
+
+pub fn mc_choice(
+  board: Board,
+  color: Color,
+  budget: Int,
+  max_depth: Int,
+) -> Result(#(Move, Int), Error) {
+  let simple_eval = evaluate_board_simple(board, color)
+  let node =
+    mc_eval_(
+      color,
+      budget,
+      max_depth,
+      N(
+        board,
+        M(C(0, 0), C(0, 0), C(0, 0)),
+        simple_eval,
+        simple_eval,
+        1,
+        dict.new(),
+      ),
+    )
+
+  // io.println(tree_to_string(0, node))
+
+  let child =
+    node.children
+    |> dict.to_list
+    |> list.map(fn(c: #(Int, MCNode)) {
+      case c {
+        #(i, c) -> #(i, final_eval_node(c), c)
+      }
+    })
+    |> list.sort(fn(a: #(Int, Float, MCNode), b: #(Int, Float, MCNode)) {
+      case a, b {
+        #(_, v_a, _), #(_, v_b, _) -> float.compare(v_b, v_a)
+        // reverse to get max
+      }
+    })
+    |> list.first()
+
+  case child {
+    Ok(#(_, value, node)) -> {
+      io.println("chose move " <> move_to_string(node.move))
+      Ok(#(node.move, float.round(value)))
+    }
+    Error(Nil) -> Error(NoAvailableMoves)
+  }
 }
 
 pub fn pick_best_move(
@@ -442,16 +854,15 @@ pub fn pick_best_move_parallel(
   |> list.first()
 }
 
-pub fn play_eval_game(
+pub fn play_choice_game(
   board: Board,
   color: Color,
-  eval: fn(Board, Color) -> Int,
+  choice: fn(Board, Color) -> Result(#(Move, Int), Error),
 ) -> Board {
-  io.println(board_to_string(board))
-  case possible_moves(board, color) {
-    [] -> board
+  case num_possible_moves(board, color) {
+    0 -> board
     _ -> {
-      case pick_best_move_parallel(board, color, eval) {
+      case choice(board, color) {
         Ok(#(move, i)) -> {
           io.println(
             "Eval for color "
@@ -460,7 +871,10 @@ pub fn play_eval_game(
             <> int.to_string(i),
           )
           case play_move(board, move, color) {
-            Ok(board) -> play_eval_game(board, other_color(color), eval)
+            Ok(board) -> {
+              io.println(board_to_string_last_move(board, 10, move))
+              play_choice_game(board, other_color(color), choice)
+            }
             Error(_) -> board
           }
         }
@@ -472,7 +886,12 @@ pub fn play_eval_game(
 
 pub fn main() {
   let board = initial_board()
-  io.println(board_to_string(board))
-  io.println(int.to_string(evaluate_board(board, black)))
-  io.println(board_to_string(play_eval_game(board, black, evaluate_board)))
+  let color = black
+
+  io.println(board_to_string(board, 10))
+  io.println(int.to_string(evaluate_board_simple(board, black)))
+
+  play_choice_game(board, color, fn(b: Board, c: Color) {
+    mc_choice(b, c, 200, 4)
+  })
 }
